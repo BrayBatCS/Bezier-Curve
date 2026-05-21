@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Bezier Curve Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{ --max-width:1100px; }
+    html,body{height:100%;}
+    body { font-family: Arial, Helvetica, sans-serif; margin: 12px; display:flex; flex-direction:column; align-items:center; }
+    #app{ width:100%; max-width:var(--max-width); }
+    #controls { margin-bottom: 8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    #left-controls{display:flex; gap:8px; align-items:center;}
+    canvas { border: 1px solid #ccc; display: block; background: #fff; width:100%; height:60vh; touch-action: none; }
+    .small { font-size: 0.9rem; color: #333; }
+    button, input { font-size: 1rem; padding: 6px 8px; }
+    .muted{color:#666}
+    @media (max-width:480px){
+      canvas{height:55vh}
+      button,input{font-size:0.95rem;padding:6px}
+    }
+  </style>
+</head>
+<body>
+  <h2>Bezier Curve Demo (click to add control points)</h2>
+  <div id="app">
+  <div id="controls">
+    <div id="left-controls">
+      <button id="practiceMode" style="background:#2196F3;color:white;font-weight:bold;">Practice Mode</button>
+      <label class="small" id="numPointsLabel">Number of points: <input id="numPoints" type="number" min="2" value="2" style="width:64px"></label>
+      <label class="small">Rounds: <input id="totalRounds" type="number" min="1" value="5" style="width:64px"></label>
+      <button id="startGame" style="background:#4CAF50;color:white;font-weight:bold;">Start Game</button>
+      <button id="quitGame" style="display:none; background:#f44336;color:white;font-weight:bold;">Quit Game</button>
+    </div>
+    <div id="practiceControls" style="display:none; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button id="exitPractice">Back</button>
+      <button id="restart">Restart</button>
+      <button id="newTarget">New Target</button>
+      <button id="checkMatch">Check Match</button>
+    </div>
+    <div style="margin-left:auto; display:flex; gap:12px; align-items:center;">
+      <span id="status" class="small">Points: 0/2</span>
+      <span id="score" class="small">Score: -</span>
+      <span id="avgScore" class="small">Average: -</span>
+      <span id="roundInfo" class="small" style="display:none;">Round: -/-</span>
+    </div>
+  </div>
+  <canvas id="c" width="800" height="600"></canvas>
+  <p class="small muted">Tap to add control points. </p>
+  <div id="resultsSummary" style="display:none; border:2px solid #4CAF50; padding:16px; margin-top:12px; border-radius:8px; background:#f0f8f0;">
+    <h3 style="margin:0 0 8px 0; color:#4CAF50;">Game Complete!</h3>
+    <div id="resultsContent"></div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const numPointsInput = document.getElementById('numPoints');
+    const restartBtn = document.getElementById('restart');
+    const statusEl = document.getElementById('status');
+    const scoreEl = document.getElementById('score');
+    const startGameBtn = document.getElementById('startGame');
+    const totalRoundsInput = document.getElementById('totalRounds');
+    const avgScoreEl = document.getElementById('avgScore');
+    const quitGameBtn = document.getElementById('quitGame');
+    const roundInfoEl = document.getElementById('roundInfo');
+    const resultsSummaryEl = document.getElementById('resultsSummary');
+    const resultsContentEl = document.getElementById('resultsContent');
+    const numPointsLabelEl = document.getElementById('numPointsLabel');
+
+    let controlPoints = [];
+    let numPointsTarget = parseInt(numPointsInput.value, 10) || 2;
+    let bezierSamples = [];
+    let animId = null;
+    let draggingIndex = -1;
+    let pointerIdToIndex = new Map();
+    // game mode state
+    let targetControlPoints = [];
+    let targetSamples = [];
+    const sampleCount = 300;
+    const solutionDisplayTime = 6000;
+    // game state
+    let gameActive = false;
+    let currentRound = 0;
+    let roundScores = [];
+    let totalRounds = 5;
+    const pointsPerRound = 4;
+
+    function updateStatus() {
+      const instruction = gameActive ? ` (place ${numPointsTarget} points)` : '';
+      statusEl.textContent = `Points: ${controlPoints.length}/${numPointsTarget}${instruction}`;
+    }
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.strokeStyle = '#f6f6f6';
+      const step = 50;
+      for (let x = 0; x < canvas.clientWidth; x += step) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.clientHeight); ctx.stroke(); }
+      for (let y = 0; y < canvas.clientHeight; y += step) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.clientWidth,y); ctx.stroke(); }
+      ctx.restore();
+    }
+
+    function drawControlPoints() {
+      ctx.save();
+      ctx.fillStyle = 'red';
+      ctx.strokeStyle = '#c00';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < controlPoints.length; i++) {
+        const p = controlPoints[i];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#000';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('P' + i, p.x, p.y - 10);
+        ctx.fillStyle = 'red';
+      }
+      // dashed lines between control points
+      if (controlPoints.length > 1) {
+        ctx.beginPath();
+        ctx.setLineDash([6,4]);
+        ctx.strokeStyle = 'rgba(200,0,0,0.6)';
+        for (let i = 0; i < controlPoints.length - 1; i++) {
+          ctx.moveTo(controlPoints[i].x, controlPoints[i].y);
+          ctx.lineTo(controlPoints[i+1].x, controlPoints[i+1].y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.restore();
+    }
+
+    function nCk(n,k){
+      if (k<0 || k>n) return 0;
+      k = Math.min(k, n-k);
+      let res = 1;
+      for (let i=1;i<=k;i++) res = res * (n - (k - i)) / i;
+      return res;
+    }
+
+    function bezierPoint(t, points) {
+      const n = points.length - 1;
+      let x = 0, y = 0;
+      for (let i = 0; i <= n; i++) {
+        const coeff = nCk(n, i) * Math.pow(t, i) * Math.pow(1 - t, n - i);
+        x += coeff * points[i].x;
+        y += coeff * points[i].y;
+      }
+      return {x, y};
+    }
+
+    function generateBezierSamples(samples = 200) {
+      const arr = [];
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        arr.push(bezierPoint(t, controlPoints));
+      }
+      return arr;
+    }
+
+    function drawBezier(points) {
+      if (!points || points.length === 0) return;
+      ctx.save();
+      ctx.strokeStyle = 'blue';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawTarget(points){
+      if (!points || points.length===0) return;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(120,120,120,0.35)';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8,6]);
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i=1;i<points.length;i++) ctx.lineTo(points[i].x, points[i].y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    function drawTargetControlPoints() {
+      if (!targetControlPoints || targetControlPoints.length === 0) return;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 128, 0, 0.8)';
+      ctx.strokeStyle = 'rgba(0, 128, 0, 1)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < targetControlPoints.length; i++) {
+        const p = targetControlPoints[i];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#000';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('T' + i, p.x, p.y - 12);
+        ctx.fillStyle = 'rgba(0, 128, 0, 0.8)';
+      }
+      ctx.restore();
+    }
+
+    function showSolutionOverlay(userSamples) {
+      cancelAnimation();
+      clearCanvas();
+      drawTarget(targetSamples);
+      drawControlPoints();
+      drawBezier(userSamples);
+      drawTargetControlPoints();
+    }
+
+    function animateBezier(samples) {
+      let idx = 0;
+      cancelAnimation();
+      function step() {
+        clearCanvas();
+        drawTarget(targetSamples);
+        drawControlPoints();
+        // draw partial curve up to idx
+        drawBezier(samples.slice(0, idx + 1));
+        idx++;
+        if (idx < samples.length) {
+          animId = requestAnimationFrame(step);
+        } else {
+          animId = null;
+          // Automatically calculate score when animation completes
+          if (gameActive) {
+            setTimeout(()=>{ autoCalculateScore(); }, 500);
+          }
+        }
+      }
+      animId = requestAnimationFrame(step);
+    }
+
+    function autoCalculateScore(){
+      if (!targetSamples || targetSamples.length===0) return;
+      if (controlPoints.length !== numPointsTarget) return;
+      const userSamples = sampleCurve(controlPoints, sampleCount);
+      const avg = computeAvgDist(userSamples, targetSamples);
+      const score = Math.max(0, Math.round(100 - avg * 0.6));
+      scoreEl.textContent = `Score: ${score}/100`;
+      // update running average during game
+      if (gameActive) {
+        roundScores.push(score);
+        const avgSoFar = Math.round(roundScores.reduce((a,b)=>a+b,0) / roundScores.length);
+        avgScoreEl.textContent = `Average: ${avgSoFar}/100`;
+      }
+      // draw final overlay and show solution points
+      showSolutionOverlay(userSamples);
+      if (gameActive) {
+        setTimeout(()=>{ nextRound(); }, solutionDisplayTime);
+      }
+    }
+
+    function cancelAnimation() {
+      if (animId !== null) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
+    }
+
+    // use pointer events for unified mouse/touch support and dragging
+    function getLocalPos(ev){
+      const rect = canvas.getBoundingClientRect();
+      return {x: ev.clientX - rect.left, y: ev.clientY - rect.top};
+    }
+
+    function findPointNear(x,y, radius=12){
+      for(let i=0;i<controlPoints.length;i++){
+        const p = controlPoints[i];
+        const dx = p.x - x, dy = p.y - y;
+        if (dx*dx+dy*dy <= radius*radius) return i;
+      }
+      return -1;
+    }
+
+    canvas.addEventListener('pointerdown', (ev)=>{
+      ev.preventDefault();
+      const pos = getLocalPos(ev);
+      const idx = findPointNear(pos.x,pos.y);
+      if (idx >= 0){
+        // start dragging existing point
+        draggingIndex = idx;
+        pointerIdToIndex.set(ev.pointerId, idx);
+        canvas.setPointerCapture(ev.pointerId);
+      } else if (controlPoints.length < numPointsTarget){
+        controlPoints.push({x:pos.x,y:pos.y});
+        updateStatus();
+        if (controlPoints.length === numPointsTarget){
+          bezierSamples = generateBezierSamples(300);
+          animateBezier(bezierSamples);
+        }
+      }
+      clearCanvas(); drawTarget(targetSamples); drawControlPoints();
+    });
+
+    canvas.addEventListener('pointermove', (ev)=>{
+      if (!pointerIdToIndex.has(ev.pointerId)) return;
+      ev.preventDefault();
+      const idx = pointerIdToIndex.get(ev.pointerId);
+      const pos = getLocalPos(ev);
+      controlPoints[idx].x = pos.x;
+      controlPoints[idx].y = pos.y;
+      cancelAnimation();
+      clearCanvas(); drawTarget(targetSamples); drawControlPoints();
+    });
+
+    canvas.addEventListener('pointerup', (ev)=>{
+      if (pointerIdToIndex.has(ev.pointerId)){
+        pointerIdToIndex.delete(ev.pointerId);
+      }
+      draggingIndex = -1;
+      clearCanvas(); drawTarget(targetSamples); drawControlPoints();
+    });
+
+    canvas.addEventListener('pointercancel', (ev)=>{
+      if (pointerIdToIndex.has(ev.pointerId)) pointerIdToIndex.delete(ev.pointerId);
+      draggingIndex = -1;
+    });
+
+    numPointsInput.addEventListener('change', () => {
+      const v = parseInt(numPointsInput.value, 10);
+      if (!isNaN(v) && v >= 2) {
+        numPointsTarget = v;
+      } else {
+        numPointsInput.value = numPointsTarget;
+        return;
+      }
+      // If in practice or game mode, regenerate the target for the new number of points
+      if (practiceMode || gameActive) {
+        generateTarget();
+      } else {
+        reset();
+        drawTarget(targetSamples);
+      }
+    });
+
+    // total rounds input
+    totalRoundsInput.addEventListener('change', () => {
+      const v = parseInt(totalRoundsInput.value, 10);
+      if (!isNaN(v) && v >= 1) {
+        totalRounds = v;
+      } else {
+        totalRoundsInput.value = totalRounds;
+      }
+      if (gameActive) {
+        // update display
+        roundInfoEl.textContent = `Round: ${currentRound}/${totalRounds}`;
+      }
+    });
+
+    restartBtn.addEventListener('click', reset);
+
+    // game controls
+    const newTargetBtn = document.getElementById('newTarget');
+    const checkMatchBtn = document.getElementById('checkMatch');
+
+    function sampleCurve(points, samples=sampleCount){
+      const arr = [];
+      for(let i=0;i<=samples;i++) arr.push(bezierPoint(i/samples, points));
+      return arr;
+    }
+
+    function generateTarget(){
+      // random control points as target
+      const rect = canvas.getBoundingClientRect();
+      const margin = 40;
+      targetControlPoints = [];
+      for(let i=0;i<numPointsTarget;i++){
+        const x = margin + Math.random()*(rect.width-2*margin);
+        const y = margin + Math.random()*(rect.height-2*margin);
+        targetControlPoints.push({x,y});
+      }
+      targetSamples = sampleCurve(targetControlPoints, sampleCount);
+      // reset user
+      controlPoints = [];
+      bezierSamples = [];
+      scoreEl.textContent = 'Score: -';
+      updateStatus();
+      clearCanvas(); drawTarget(targetSamples); drawControlPoints();
+    }
+
+    function computeAvgDist(a,b){
+      // handle empty inputs
+      if (!a || !b || a.length === 0 || b.length === 0) return Infinity;
+      // interpolate between samples if arrays differ in length so we always compare corresponding
+      function interp(arr, t){
+        const n = arr.length;
+        if (n === 1) return arr[0];
+        const pos = t * (n - 1);
+        const i = Math.floor(pos);
+        const j = Math.min(n - 1, i + 1);
+        const f = pos - i;
+        return {
+          x: arr[i].x * (1 - f) + arr[j].x * f,
+          y: arr[i].y * (1 - f) + arr[j].y * f
+        };
+      }
+      function compareArrays(arr1, arr2){
+        const M = Math.max(arr1.length, arr2.length);
+        let s = 0;
+        for (let k = 0; k < M; k++){
+          const t = M === 1 ? 0 : k / (M - 1);
+          const p1 = interp(arr1, t);
+          const p2 = interp(arr2, t);
+          const dx = p1.x - p2.x;
+          const dy = p1.y - p2.y;
+          s += Math.hypot(dx, dy);
+        }
+        return s / M;
+      }
+      const forwardDist = compareArrays(a, b);
+      const reverseB = b.slice().reverse();
+      const reverseDist = compareArrays(a, reverseB);
+      return Math.min(forwardDist, reverseDist);
+    }
+
+    checkMatchBtn.addEventListener('click', ()=>{
+      if (!targetSamples || targetSamples.length===0){ alert('Generate a target first.'); return; }
+      if (controlPoints.length !== numPointsTarget){ alert('Place the correct number of control points first.'); return; }
+      const userSamples = sampleCurve(controlPoints, sampleCount);
+      const avg = computeAvgDist(userSamples, targetSamples);
+      // score mapping: 100 at avg=0, decays by 10 px => -10 points per 1px? we'll map simply
+      const score = Math.max(0, Math.round(100 - avg * 0.5));
+      scoreEl.textContent = `Score: ${score}/100`;
+      // draw final overlay and show solution points
+      showSolutionOverlay(userSamples);
+      // small message
+      const msg = document.getElementById('msg');
+      if (msg) msg.textContent = `Average Score Error: ${avg.toFixed(2)} px`;
+      // if in game mode, record the score and move to next round
+      if (gameActive) {
+        roundScores.push(score);
+        const avgSoFar = Math.round(roundScores.reduce((a,b)=>a+b,0) / roundScores.length);
+        avgScoreEl.textContent = `Average: ${avgSoFar}/100`;
+        setTimeout(()=>{ nextRound(); }, solutionDisplayTime);
+      }
+    });
+
+    newTargetBtn.addEventListener('click', ()=>{ generateTarget(); });
+
+    // Mode management
+    let practiceMode = false;
+
+    function enterPracticeMode(){
+      practiceMode = true;
+      gameActive = false;
+      document.getElementById('practiceControls').style.display = 'flex';
+      document.getElementById('practiceMode').style.display = 'none';
+      document.getElementById('startGame').style.display = 'none';
+      resultsSummaryEl.style.display = 'none';
+      roundInfoEl.style.display = 'none';
+      numPointsTarget = parseInt(numPointsInput.value, 10) || 2;
+      generateTarget();
+    }
+
+    function exitPracticeMode(){
+      practiceMode = false;
+      document.getElementById('practiceControls').style.display = 'none';
+      document.getElementById('practiceMode').style.display = 'inline-block';
+      document.getElementById('startGame').style.display = 'inline-block';
+      reset();
+    }
+
+    document.getElementById('practiceMode').addEventListener('click', enterPracticeMode);
+
+    // exit/back from practice
+    document.getElementById('exitPractice').addEventListener('click', exitPracticeMode);
+
+    // quit/exit game while in progress
+    quitGameBtn.addEventListener('click', ()=>{ exitGame(); });
+
+    // Game mode functions
+    function startGame(){
+      gameActive = true;
+      practiceMode = false;
+      currentRound = 0;
+      roundScores = [];
+      // respect the number chosen in the menu; fall back to pointsPerRound
+      numPointsTarget = parseInt(numPointsInput.value, 10) || pointsPerRound;
+      numPointsInput.value = numPointsTarget;
+      // use chosen total rounds
+      totalRounds = parseInt(totalRoundsInput.value, 10) || totalRounds;
+      totalRoundsInput.value = totalRounds;
+      document.getElementById('practiceControls').style.display = 'none';
+      document.getElementById('practiceMode').style.display = 'none';
+      document.getElementById('startGame').style.display = 'none';
+      resultsSummaryEl.style.display = 'none';
+      roundInfoEl.style.display = 'inline';
+      quitGameBtn.style.display = 'inline-block';
+      generateTarget();
+      nextRound();
+    }
+
+    function nextRound(){
+      if (currentRound < totalRounds) {
+        currentRound++;
+        roundInfoEl.textContent = `Round: ${currentRound}/${totalRounds}`;
+        generateTarget();
+      } else {
+        endGame();
+      }
+    }
+
+    function endGame(){
+      gameActive = false;
+      checkMatchBtn.disabled = true;
+      newTargetBtn.disabled = true;
+      restartBtn.disabled = true;
+      const avgScore = Math.round(roundScores.reduce((a,b)=>a+b, 0) / roundScores.length);
+      let resultsHtml = `<p style="margin:0;"><strong>Average Score: ${avgScore}/100</strong></p>`;
+      resultsHtml += '<p style="margin:8px 0 0 0; font-size:0.9rem;"><strong>Round Scores:</strong><br>';
+      for(let i=0;i<roundScores.length;i++){
+        resultsHtml += `Round ${i+1}: ${roundScores[i]}<br>`;
+      }
+      resultsHtml += '</p>';
+      resultsHtml += `<p style="margin:8px 0 0 0; font-size:0.9rem; font-weight:bold;">Total Points Earned: ${roundScores.reduce((a,b)=>a+b, 0)}/${roundScores.length * 100}</p>`;
+      resultsHtml += '<button id="playAgain" style="margin-top:8px; padding:8px 16px; background:#4CAF50; color:white; border:none; cursor:pointer; border-radius:4px;">Play Again</button>';
+      resultsContentEl.innerHTML = resultsHtml;
+      resultsSummaryEl.style.display = 'block';
+      roundInfoEl.style.display = 'none';
+      quitGameBtn.style.display = 'none';
+      avgScoreEl.textContent = `Average: ${avgScore}/100`;
+      document.getElementById('playAgain').addEventListener('click', ()=>{
+        checkMatchBtn.disabled = false;
+        newTargetBtn.disabled = false;
+        restartBtn.disabled = false;
+        document.getElementById('practiceMode').style.display = 'inline-block';
+        document.getElementById('startGame').style.display = 'inline-block';
+        resultsSummaryEl.style.display = 'none';
+        reset();
+      });
+    }
+
+    function exitGame(){
+      gameActive = false;
+      roundScores = [];
+      currentRound = 0;
+      checkMatchBtn.disabled = false;
+      newTargetBtn.disabled = false;
+      restartBtn.disabled = false;
+      document.getElementById('practiceMode').style.display = 'inline-block';
+      document.getElementById('startGame').style.display = 'inline-block';
+      document.getElementById('practiceControls').style.display = 'none';
+      resultsSummaryEl.style.display = 'none';
+      roundInfoEl.style.display = 'none';
+      quitGameBtn.style.display = 'none';
+      avgScoreEl.textContent = 'Average: -';
+      reset();
+    }
+
+    startGameBtn.addEventListener('click', startGame);
+
+    function reset() {
+      cancelAnimation();
+      controlPoints = [];
+      bezierSamples = [];
+      clearCanvas();
+      drawControlPoints();
+      updateStatus();
+    }
+
+    // initial draw
+    clearCanvas();
+    drawControlPoints();
+    updateStatus();
+    // message area
+    const msgArea = document.createElement('div'); msgArea.id='msg'; msgArea.className='small muted'; msgArea.style.marginTop='6px'; document.getElementById('app').appendChild(msgArea);
+
+    // responsiveness: scale canvas with device pixel ratio
+    (function adjustDPI(){
+      const dpr = window.devicePixelRatio || 1;
+      const styleW = canvas.width;
+      const styleH = canvas.height;
+      canvas.width = styleW * dpr;
+      canvas.height = styleH * dpr;
+      canvas.style.width = styleW + 'px';
+      canvas.style.height = styleH + 'px';
+      ctx.scale(dpr, dpr);
+    })();
+  </script>
+</body>
+</html>
